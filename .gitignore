@@ -1,0 +1,13 @@
+# 인증키·비밀번호·서버 주소
+.env
+.env.*
+!.env.example
+
+.venv/
+__pycache__/
+data/
+models/
+*.log
+.idea/
+.vscode/
+.DS_Store
