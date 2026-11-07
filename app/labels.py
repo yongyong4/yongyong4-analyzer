@@ -9,7 +9,7 @@ import os
 
 import pandas as pd
 
-from app import config
+from app import config, features
 
 MAX_TRAVEL = pd.Timedelta(minutes=90)   # 도착예정 후 이 안에 통과해야 같은 회차로 봄
 MAX_SKIP_SEQ = 5                        # 처음 관측 순번이 정류장보다 이만큼 넘으면 버림
@@ -50,6 +50,8 @@ def build(raw_dir: str) -> pd.DataFrame:
     arr = _read(raw_dir, "bus_arrival")
     arr = arr[arr.route_id.isin(config.ROUTES) & arr.station_id.isin(config.STATIONS)
               & arr.plate_no.notna()]
+    # 앞차 정보는 정답 유무와 상관없이 그 시각 도착정보 전체에서 계산한다 (요청의 arrivals와 같게)
+    arr = features.add_ahead(arr.rename(columns={"predict_time_sec": "pred_sec", "remain_seat_cnt": "seat_now"}))
 
     keys = ["day", "route_id", "plate_no"]
     loc = loc[keys + ["t", "station_seq", "remain_seat_cnt"]].sort_values("t")
@@ -73,9 +75,9 @@ def build(raw_dir: str) -> pd.DataFrame:
         out.append(a)
 
     df = pd.concat(out, ignore_index=True)
-    df["pred_at"] = df.t + pd.to_timedelta(df.predict_time_sec, unit="s")
+    df["pred_at"] = df.t + pd.to_timedelta(df.pred_sec, unit="s")
     df["err_min"] = (df.actual_at - df.pred_at).dt.total_seconds() / 60
-    return df.rename(columns={"predict_time_sec": "pred_sec", "remain_seat_cnt": "seat_now"})[
+    return df[
         ["day", "t", "route_id", "station_id", "plate_no", "arrival_order", "pred_sec",
-         "seat_now", "pred_at", "actual_at", "err_min", "seat_at"]
+         "seat_now", "ahead_sec", "ahead_seat", "pred_at", "actual_at", "err_min", "seat_at"]
     ].sort_values("t", ignore_index=True)
