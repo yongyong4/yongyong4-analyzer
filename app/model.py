@@ -9,15 +9,22 @@ import pandas as pd
 from app import config, features
 
 
-def apply(seat_model, arrival_model, df: pd.DataFrame, capacity: dict):
-    """좌석 = 현재 좌석 - 예측 감소량 (0~현재 좌석), 도착 = GBIS 도착 예정 + 예측 오차(분)."""
+def predict_seats(seat_model, df: pd.DataFrame, capacity: dict) -> np.ndarray:
+    """좌석 = 현재 좌석 - 예측 감소량 (0~현재 좌석). 현재 좌석이 없으면 NaN."""
     x = features.make(df, capacity)
-    drop = seat_model.predict(x)
     seat_now = x.seat_now.to_numpy()
-    seats = np.clip(np.round(seat_now - drop), 0, seat_now)          # 현재 좌석이 없으면 NaN
+    return np.clip(np.round(seat_now - seat_model.predict(x)), 0, seat_now)
+
+
+def predict_arrival(arrival_model, df: pd.DataFrame, capacity: dict) -> pd.Series:
+    """도착 = GBIS 도착 예정 + 예측 오차(분)."""
+    x = features.make(df, capacity)
     pred_at = df.t + pd.to_timedelta(df.pred_sec, unit="s")
-    arrival_at = pred_at + pd.to_timedelta(arrival_model.predict(x), unit="m")
-    return seats, arrival_at
+    return pred_at + pd.to_timedelta(arrival_model.predict(x), unit="m")
+
+
+def apply(seat_model, arrival_model, df: pd.DataFrame, capacity: dict):
+    return predict_seats(seat_model, df, capacity), predict_arrival(arrival_model, df, capacity)
 
 
 def save(version: str, seat_model, arrival_model, meta: dict) -> str:
@@ -30,17 +37,21 @@ def save(version: str, seat_model, arrival_model, meta: dict) -> str:
     return path
 
 
-def active_version() -> str | None:
+def active() -> dict:
+    """모델 종류별 사용 중 버전과 평일·주말 사용 여부.
+    예: {"seat": {"version": "v3-20261110", "weekday": true, "weekend": true},
+         "arrival": {"version": "v3-20261110", "weekday": true, "weekend": false}}
+    """
     path = os.path.join(config.MODEL_DIR, "active.json")
     if not os.path.exists(path):
-        return None
+        return {}
     with open(path, encoding="utf-8") as f:
-        return json.load(f)["version"]
+        return json.load(f)
 
 
-def set_active(version: str) -> None:
+def set_active(state: dict) -> None:
     with open(os.path.join(config.MODEL_DIR, "active.json"), "w", encoding="utf-8") as f:
-        json.dump({"version": version}, f)
+        json.dump(state, f, ensure_ascii=False, indent=2)
 
 
 def load(version: str):
