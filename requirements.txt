@@ -3,3 +3,5 @@ numpy==2.5.4
 lightgbm==4.7.0
 scikit-learn==1.9.1
 python-dotenv==1.2.4
+fastapi==0.162.0
+uvicorn==0.54.0
