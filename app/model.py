@@ -30,17 +30,21 @@ def save(version: str, seat_model, arrival_model, meta: dict) -> str:
     return path
 
 
-def active_version() -> str | None:
+def active() -> dict:
+    """모델 종류별 사용 중 버전과 평일·주말 사용 여부.
+    예: {"seat": {"version": "v3-20261110", "weekday": true, "weekend": true},
+         "arrival": {"version": "v3-20261110", "weekday": true, "weekend": false}}
+    """
     path = os.path.join(config.MODEL_DIR, "active.json")
     if not os.path.exists(path):
-        return None
+        return {}
     with open(path, encoding="utf-8") as f:
-        return json.load(f)["version"]
+        return json.load(f)
 
 
-def set_active(version: str) -> None:
+def set_active(state: dict) -> None:
     with open(os.path.join(config.MODEL_DIR, "active.json"), "w", encoding="utf-8") as f:
-        json.dump({"version": version}, f)
+        json.dump(state, f, ensure_ascii=False, indent=2)
 
 
 def load(version: str):

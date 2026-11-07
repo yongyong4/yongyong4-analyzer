@@ -27,7 +27,17 @@
    .venv/bin/python -c "from app import collector; collector.download()"
    ```
 
-5. 예측 서버를 실행합니다.
+5. 모델을 학습합니다. (`models/v{번호}-{날짜}/`에 저장, 통과하면 사용 중 버전 교체)
+   ```bash
+   .venv/bin/python -m app.train                  # 수집 서버에서 받고 학습
+   .venv/bin/python -m app.train --skip-download  # 이미 받은 data/raw로 학습
+   ```
+   - 합격 판정은 모델 종류(좌석·도착) × 평일·주말 4칸을 따로 함. 합격한 칸만 사용하고, 나머지는 GBIS 값 그대로
+   - 합격 조건: GBIS 값과 과거 평균, 두 기준선보다 오차가 낮음 (좌석은 '만석인데 여유' 비율도). 평일은 시험한 날의 80% 이상에서 GBIS 값보다 나음. 사용 중 모델보다 3% 넘게 나빠지지 않음
+   - 노선별 성적은 기록만 함 (`meta.json`)
+   - 실행할 때마다 결과를 `models/history.jsonl`에 한 줄씩 기록
+   - 수집 시간대(평일 06:00-10:30, 주말 10:00-15:00)를 피해서 실행
+6. 예측 서버를 실행합니다.
    ```bash
    .venv/bin/uvicorn app.server:app --port 8000
    ```
@@ -83,6 +93,7 @@ app/
   labels.py      같은 차량을 따라가 실제 통과 시각·도착 시점 좌석(정답) 만들기
   features.py    특징값 (학습과 /predict가 같은 함수 사용)
   model.py       모델 적용·저장·불러오기
+  train.py       학습 → 하루씩 시험 → 좌석·도착 × 평일·주말 합격 판정 → 새 버전 저장
   server.py      FastAPI POST /predict (지금은 stub)
 experiments/     데이터 분석·모델 비교 스크립트
 data/            내려받은 CSV·정답 (git 제외)
@@ -91,8 +102,7 @@ models/          학습한 모델 (git 제외)
 
 ## 이후 작업
 
-1. `train.py`: 매일 학습 → 평가 → 기준선·현재 모델보다 나을 때만 새 버전 저장
-2. `server.py`: stub을 실제 모델 예측으로 교체 (모델이 없으면 503)
-3. `db.py`: service DB에 `bus_pass`, `model_eval` 쓰기
-4. `stats.py`: 광역·마을버스 배차간격 `slot_stat`
-5. 배포 서버에 매일 재학습 cron 등록
+1. `server.py`: stub을 실제 모델 예측으로 교체 (모델이 없으면 503)
+2. `db.py`: service DB에 `bus_pass`, `model_eval` 쓰기
+3. `stats.py`: 광역·마을버스 배차간격 `slot_stat`
+4. 배포 서버에 매일 재학습 cron 등록
