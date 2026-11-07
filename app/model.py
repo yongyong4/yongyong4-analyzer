@@ -9,15 +9,22 @@ import pandas as pd
 from app import config, features
 
 
-def apply(seat_model, arrival_model, df: pd.DataFrame, capacity: dict):
-    """좌석 = 현재 좌석 - 예측 감소량 (0~현재 좌석), 도착 = GBIS 도착 예정 + 예측 오차(분)."""
+def predict_seats(seat_model, df: pd.DataFrame, capacity: dict) -> np.ndarray:
+    """좌석 = 현재 좌석 - 예측 감소량 (0~현재 좌석). 현재 좌석이 없으면 NaN."""
     x = features.make(df, capacity)
-    drop = seat_model.predict(x)
     seat_now = x.seat_now.to_numpy()
-    seats = np.clip(np.round(seat_now - drop), 0, seat_now)          # 현재 좌석이 없으면 NaN
+    return np.clip(np.round(seat_now - seat_model.predict(x)), 0, seat_now)
+
+
+def predict_arrival(arrival_model, df: pd.DataFrame, capacity: dict) -> pd.Series:
+    """도착 = GBIS 도착 예정 + 예측 오차(분)."""
+    x = features.make(df, capacity)
     pred_at = df.t + pd.to_timedelta(df.pred_sec, unit="s")
-    arrival_at = pred_at + pd.to_timedelta(arrival_model.predict(x), unit="m")
-    return seats, arrival_at
+    return pred_at + pd.to_timedelta(arrival_model.predict(x), unit="m")
+
+
+def apply(seat_model, arrival_model, df: pd.DataFrame, capacity: dict):
+    return predict_seats(seat_model, df, capacity), predict_arrival(arrival_model, df, capacity)
 
 
 def save(version: str, seat_model, arrival_model, meta: dict) -> str:
