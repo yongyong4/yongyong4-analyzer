@@ -7,7 +7,7 @@
 
 - Python 3.12 (uv로 가상환경 생성)
 - pandas, scikit-learn, LightGBM
-- FastAPI (`/predict`): **개발 예정**
+- FastAPI (`/predict`): 요청 검증만 하는 stub 단계 (예측값 대신 받은 값을 그대로 돌려줌)
 - MariaDB (service DB 분석 테이블 `bus_pass`, `slot_stat`, `model_eval`): **개발 예정**
 
 ## 초기 실행
@@ -26,6 +26,14 @@
    ```bash
    .venv/bin/python -c "from app import collector; collector.download()"
    ```
+
+5. 예측 서버를 실행합니다.
+   ```bash
+   .venv/bin/uvicorn app.server:app --port 8000
+   ```
+   - http://localhost:8000/health → `status: UP`
+   - http://localhost:8000/docs → `/predict` 요청을 화면에서 직접 보내 볼 수 있음
+   - 백엔드는 `PREDICT_BASE_URL=http://localhost:8000`으로 연결
 
 ## 환경변수 (`.env`)
 
@@ -75,6 +83,7 @@ app/
   labels.py      같은 차량을 따라가 실제 통과 시각·도착 시점 좌석(정답) 만들기
   features.py    특징값 (학습과 /predict가 같은 함수 사용)
   model.py       모델 적용·저장·불러오기
+  server.py      FastAPI POST /predict (지금은 stub)
 experiments/     데이터 분석·모델 비교 스크립트
 data/            내려받은 CSV·정답 (git 제외)
 models/          학습한 모델 (git 제외)
@@ -83,7 +92,7 @@ models/          학습한 모델 (git 제외)
 ## 이후 작업
 
 1. `train.py`: 매일 학습 → 평가 → 기준선·현재 모델보다 나을 때만 새 버전 저장
-2. `server.py`: FastAPI `POST /predict` (명세 「도착·좌석 예측」)
+2. `server.py`: stub을 실제 모델 예측으로 교체 (모델이 없으면 503)
 3. `db.py`: service DB에 `bus_pass`, `model_eval` 쓰기
 4. `stats.py`: 광역·마을버스 배차간격 `slot_stat`
 5. 배포 서버에 매일 재학습 cron 등록
