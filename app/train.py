@@ -19,7 +19,7 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
-from app import collector, config, features, labels, model
+from app import collector, config, db, features, labels, model
 
 COMMON = dict(n_estimators=400, learning_rate=0.05, num_leaves=31,
               min_child_samples=30, verbose=-1, random_state=0)
@@ -206,7 +206,16 @@ def run(skip_download: bool = False) -> dict:
     summary = {dt: {k: v for k, v in result[dt].items() if k != "by_route"} for dt in DAY_TYPES if dt in result}
     append_history(dict(run_at=run_at, version=version, data_to=str(max(df.day)), passed=passed,
                         reasons=decisions, active=state, **summary))
-    return dict(version=version, passed=passed, reasons=decisions, active=state, result=result)
+
+    saved = None
+    if db.enabled():   # DB 쓰기가 실패해도 학습 결과(모델 파일)는 그대로 둔다
+        try:
+            rows = db.bus_pass_rows(df, labels.station_seq(raw_dir), labels.capacity(daily_cap))
+            saved = dict(bus_pass=db.write_bus_pass(rows),
+                         model_eval=db.write_model_eval(run_at, version, result, passed, state))
+        except Exception as e:
+            saved = dict(error=str(e))
+    return dict(version=version, passed=passed, reasons=decisions, active=state, result=result, db=saved)
 
 
 def main():
@@ -236,6 +245,12 @@ def main():
                 print(f"     - {reason}")
     print(f"\n새 버전: {out['version'] or '없음 (기존 유지)'}")
     print("사용 중:", json.dumps(out["active"], ensure_ascii=False))
+    if out["db"] is None:
+        print("DB: 저장 안 함 (MYSQL_HOST 없음)")
+    elif "error" in out["db"]:
+        print(f"DB: 저장 실패 — {out['db']['error']}")
+    else:
+        print(f"DB: bus_pass {out['db']['bus_pass']}건, model_eval {out['db']['model_eval']}건 저장")
 
 
 if __name__ == "__main__":

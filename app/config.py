@@ -11,6 +11,13 @@ DATA_FROM = os.getenv("DATA_FROM", "2026-10-28")
 DATA_DIR = os.getenv("DATA_DIR", "data")
 MODEL_DIR = os.getenv("MODEL_DIR", "models")
 
+# 서비스 DB (bus_pass, model_eval). MYSQL_HOST가 비어 있으면 DB에 쓰지 않는다
+MYSQL_HOST = os.getenv("MYSQL_HOST", "")
+MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "yongyong")
+MYSQL_USER = os.getenv("MYSQL_USER", "")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+
 # 수집 광역 노선 (gbisRouteId → 노선번호)
 ROUTES = {
     "228000174": "5000",

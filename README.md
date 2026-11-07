@@ -7,8 +7,8 @@
 
 - Python 3.12 (uv로 가상환경 생성)
 - pandas, scikit-learn, LightGBM
-- FastAPI (`/predict`): 요청 검증만 하는 stub 단계 (예측값 대신 받은 값을 그대로 돌려줌)
-- MariaDB (service DB 분석 테이블 `bus_pass`, `slot_stat`, `model_eval`): **개발 예정**
+- FastAPI (`/predict`): 사용 중 모델로 좌석·도착 예측 (판정에 떨어진 칸은 받은 값을 그대로 돌려줌)
+- MariaDB/MySQL (service DB 분석 테이블 `bus_pass`, `model_eval`): 학습할 때마다 저장. `slot_stat`은 개발 예정
 
 ## 초기 실행
 
@@ -22,6 +22,10 @@
    ```bash
    cp .env.example .env
    ```
+   - DB에 저장하려면 서비스 DB에서 테이블을 최초 1회 만듭니다. (백엔드 `sql/trip_schema.sql`과 같은 방식)
+     ```bash
+     mysql -u root -p yongyong < sql/schema.sql
+     ```
 4. 수집 서버에서 학습 데이터를 받습니다. (`data/raw/`에 CSV 저장)
    ```bash
    .venv/bin/python -c "from app import collector; collector.download()"
@@ -36,12 +40,15 @@
    - 합격 조건: GBIS 값과 과거 평균, 두 기준선보다 오차가 낮음 (좌석은 '만석인데 여유' 비율도). 평일은 시험한 날의 80% 이상에서 GBIS 값보다 나음. 사용 중 모델보다 3% 넘게 나빠지지 않음
    - 노선별 성적은 기록만 함 (`meta.json`)
    - 실행할 때마다 결과를 `models/history.jsonl`에 한 줄씩 기록
+   - `MYSQL_HOST`가 있으면 DB에도 저장: `bus_pass`(실제 통과 기록), `model_eval`(좌석·도착 × 평일·주말 성적, 사용 중 여부). 다시 실행해도 `bus_pass`는 중복되지 않음
    - 수집 시간대(평일 06:00-10:30, 주말 10:00-15:00)를 피해서 실행
 6. 예측 서버를 실행합니다.
    ```bash
    .venv/bin/uvicorn app.server:app --port 8000
    ```
-   - http://localhost:8000/health → `status: UP`
+   - http://localhost:8000/health → `status: UP`, 사용 중 모델 버전
+   - 매일 학습으로 `models/active.json`이 바뀌면 재시작 없이 다음 요청부터 새 모델 사용
+   - 모델이 없거나 예측에 실패하면 500 → 백엔드는 받은 값을 그대로 씀 (OBSERVED)
    - http://localhost:8000/docs → `/predict` 요청을 화면에서 직접 보내 볼 수 있음
    - 백엔드는 `PREDICT_BASE_URL=http://localhost:8000`으로 연결
 
@@ -53,6 +60,28 @@
 | `DATA_FROM` | 학습 데이터 시작일 (수집 시작 2026-10-28) |
 | `DATA_DIR` | 내려받은 CSV·정답 저장 위치 (기본 `data`) |
 | `MODEL_DIR` | 학습한 모델 저장 위치 (기본 `models`) |
+| `MYSQL_HOST`, `MYSQL_PORT` | 서비스 DB 주소 (비우면 DB에 저장 안 함) |
+| `MYSQL_DATABASE` | DB 이름 (기본 `yongyong`) |
+| `MYSQL_USER`, `MYSQL_PASSWORD` | DB 계정 (백엔드와 같은 값) |
+
+## 서비스 DB (분석 테이블)
+
+- 테이블 생성 SQL: `sql/schema.sql` (`bus_pass`, `model_eval`). 서비스 DB에서 **최초 1회** 실행합니다.
+  ```bash
+  mysql -u root -p yongyong < sql/schema.sql
+  ```
+- 백엔드 테이블(`Yongyong4-backend/sql/trip_schema.sql`)과 같은 방식(`CREATE TABLE IF NOT EXISTS`)이라 다시 실행해도 안전합니다.
+- 백엔드는 이 테이블을 읽지 않고, `/predict`도 DB를 쓰지 않습니다. 테이블이 없어도 서비스는 정상 동작하고, 학습 결과만 DB에 남지 않습니다.
+
+| 테이블 | 언제 | 내용 |
+|---|---|---|
+| `bus_pass` | 학습할 때마다 (전체 기간 다시 저장, 중복 없음) | 버스 1대가 정류장 1곳을 실제로 지난 시각·좌석 (AI 정답) |
+| `model_eval` | 학습할 때마다 4줄 추가 | 좌석·도착 × 평일·주말 성적(기준선 = GBIS 값), 통과 여부, 사용 중 여부 (`models/active.json`과 같음) |
+
+**ERD와 다른 점**
+- `model_eval.day_type` 추가 (`WEEKDAY` / `WEEKEND`, `slot_stat.day_type`과 같은 값): 평일·주말을 따로 판정하기 때문
+- 인덱스 `idx_model_active`에 `day_type` 추가
+- 새 버전을 만들지 않은 날(모두 불합격)은 `model_version = '미채택'`, `model_path = NULL`로 기록
 
 ## 예측 대상
 
@@ -94,7 +123,9 @@ app/
   features.py    특징값 (학습과 /predict가 같은 함수 사용)
   model.py       모델 적용·저장·불러오기
   train.py       학습 → 하루씩 시험 → 좌석·도착 × 평일·주말 합격 판정 → 새 버전 저장
-  server.py      FastAPI POST /predict (지금은 stub)
+  server.py      FastAPI POST /predict
+  db.py          서비스 DB에 bus_pass, model_eval 저장
+sql/schema.sql   분석 테이블 생성 (최초 1회)
 experiments/     데이터 분석·모델 비교 스크립트
 data/            내려받은 CSV·정답 (git 제외)
 models/          학습한 모델 (git 제외)
@@ -102,7 +133,5 @@ models/          학습한 모델 (git 제외)
 
 ## 이후 작업
 
-1. `server.py`: stub을 실제 모델 예측으로 교체 (모델이 없으면 503)
-2. `db.py`: service DB에 `bus_pass`, `model_eval` 쓰기
-3. `stats.py`: 광역·마을버스 배차간격 `slot_stat`
-4. 배포 서버에 매일 재학습 cron 등록
+1. `stats.py`: 광역·마을버스 배차간격 `slot_stat`
+2. 배포 서버에 매일 재학습 cron 등록
