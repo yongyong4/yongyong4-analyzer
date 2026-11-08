@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS bus_pass (
 
 CREATE TABLE IF NOT EXISTS model_eval (
     eval_id        BIGINT        NOT NULL AUTO_INCREMENT COMMENT '평가 ID',
-    model_type     VARCHAR(20)   NOT NULL COMMENT '모델 종류: ARRIVAL 도착시간 보정 / SEAT 잔여좌석 예측',
+    model_type     VARCHAR(20)   NOT NULL COMMENT '모델 종류: ARRIVAL 도착시간 보정 / SEAT 잔여좌석 예측 (수집 정류장) / SEAT_ALL 잔여좌석 예측 (그 외 정류장)',
     day_type       VARCHAR(20)   NOT NULL COMMENT '요일 구분: WEEKDAY 평일 / WEEKEND 주말',
     model_version  VARCHAR(50)   NOT NULL COMMENT '모델 버전',
     route_id       VARCHAR(20)   NULL     COMMENT '노선 ID (NULL = 전체)',

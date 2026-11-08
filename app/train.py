@@ -2,7 +2,8 @@
 
 실행: .venv/bin/python -m app.train [--skip-download]
 
-합격 판정은 모델 종류(좌석·도착) × 평일·주말 4칸을 따로 한다 (FR-DA-07, FR-AN-02, NFR-05).
+모델은 3종류: 좌석·도착(수집 정류장 5곳, GBIS 도착정보로 학습), 좌석(5곳 밖, 버스 위치로 학습).
+합격 판정은 모델 종류 × 평일·주말 칸을 따로 한다 (FR-DA-07, FR-AN-02, NFR-05).
   - 기준선 2개(GBIS 값 그대로, 과거 평균)보다 오차가 모두 낮다 (FR-DA-06)
   - 좌석은 '만석인데 여유' 비율도 두 기준선보다 낮다
   - 평일은 시험한 날의 80% 이상에서 GBIS 기준선보다 낫다 (주말은 시험 날짜가 적어 제외)
@@ -27,19 +28,23 @@ SEAT_PARAMS = dict(objective="quantile", alpha=0.7)   # 보수적 예측: 감소
 MIN_TRAIN_DAYS = 3
 STABLE_RATIO = 0.8
 MAX_WORSE = 1.03
-KINDS = ("seat", "arrival")
+KINDS = ("seat", "arrival", "seat_all")
 DAY_TYPES = ("weekday", "weekend")
-KIND_NAME = {"seat": "좌석", "arrival": "도착"}
+KIND_NAME = {"seat": "좌석", "arrival": "도착", "seat_all": "좌석(5곳 밖)"}
 DAY_NAME = {"weekday": "평일", "weekend": "주말"}
+
+
+def fit_seat(df: pd.DataFrame, capacity: dict, stations=None):
+    """좌석 모델: 감소량(현재 - 도착 시점)을 학습한다."""
+    x = features.make(df, capacity, stations)
+    s = (df.seat_now >= 0) & (df.seat_at >= 0)
+    return lgb.LGBMRegressor(**COMMON, **SEAT_PARAMS).fit(x[s], (df.seat_now - df.seat_at)[s])
 
 
 def fit(df: pd.DataFrame, capacity: dict):
     """좌석 모델은 감소량(현재 - 도착 시점), 도착 모델은 GBIS 오차(분)를 학습한다."""
-    x = features.make(df, capacity)
-    s = (df.seat_now >= 0) & (df.seat_at >= 0)
-    seat = lgb.LGBMRegressor(**COMMON, **SEAT_PARAMS).fit(x[s], (df.seat_now - df.seat_at)[s])
-    arrival = lgb.LGBMRegressor(**COMMON).fit(x, df.err_min)
-    return seat, arrival
+    arrival = lgb.LGBMRegressor(**COMMON).fit(features.make(df, capacity), df.err_min)
+    return fit_seat(df, capacity), arrival
 
 
 def _groups(df: pd.DataFrame) -> pd.DataFrame:
@@ -49,26 +54,31 @@ def _groups(df: pd.DataFrame) -> pd.DataFrame:
                          "weekend": df.t.dt.day_of_week >= 5}, index=df.index)
 
 
-def average_baseline(tr: pd.DataFrame, te: pd.DataFrame):
-    """과거 평균 기준선: 노선 × 정류장 × 30분 시간대 × 남은 시간(5분) × 평일/주말의 평균 감소량·평균 오차.
+def _average(tr: pd.DataFrame, te: pd.DataFrame, target: pd.Series) -> pd.Series:
+    """노선 × 정류장 × 30분 시간대 × 남은 시간(5분) × 평일/주말의 평균.
     그 묶음이 학습 데이터에 없으면 시간대를 뺀 평균, 그것도 없으면 0."""
     g_tr, g_te = _groups(tr), _groups(te)
+    fine_keys = ["route_id", "station_id", "slot", "ahead", "weekend"]
+    coarse_keys = ["route_id", "station_id", "ahead", "weekend"]
+    fine = target.groupby([g_tr[k] for k in fine_keys]).mean()
+    coarse = target.groupby([g_tr[k] for k in coarse_keys]).mean()
+    v = pd.MultiIndex.from_frame(g_te[fine_keys]).map(fine.to_dict().get)
+    c = pd.MultiIndex.from_frame(g_te[coarse_keys]).map(coarse.to_dict().get)
+    return pd.Series(v, index=te.index, dtype=float).fillna(pd.Series(c, index=te.index, dtype=float)).fillna(0)
+
+
+def average_seats(tr: pd.DataFrame, te: pd.DataFrame, capacity: dict | None = None) -> np.ndarray:
+    """과거 평균 기준선(좌석): 현재 좌석 - 평균 감소량. capacity를 넘기면 모델처럼 정원까지 늘 수 있다."""
     s = (tr.seat_now >= 0) & (tr.seat_at >= 0)
-    target = pd.DataFrame({"drop": (tr.seat_now - tr.seat_at).where(s), "err": tr.err_min}, index=tr.index)
+    drop = _average(tr, te, (tr.seat_now - tr.seat_at).where(s))
+    x = features.make(te, capacity or {})
+    upper = model.seat_upper(x, capacity is not None)
+    return np.clip(np.round(x.seat_now.to_numpy() - drop.to_numpy()), 0, upper)
 
-    def lookup(col):
-        fine_keys = ["route_id", "station_id", "slot", "ahead", "weekend"]
-        coarse_keys = ["route_id", "station_id", "ahead", "weekend"]
-        fine = target[col].groupby([g_tr[k] for k in fine_keys]).mean()
-        coarse = target[col].groupby([g_tr[k] for k in coarse_keys]).mean()
-        v = pd.MultiIndex.from_frame(g_te[fine_keys]).map(fine.to_dict().get)
-        c = pd.MultiIndex.from_frame(g_te[coarse_keys]).map(coarse.to_dict().get)
-        return pd.Series(v, index=te.index, dtype=float).fillna(pd.Series(c, index=te.index, dtype=float)).fillna(0)
 
-    seat_now = te.seat_now.where(te.seat_now >= 0).astype(float)
-    seats = np.clip(np.round(seat_now - lookup("drop")), 0, seat_now).to_numpy()
-    arrival_at = te.pred_at + pd.to_timedelta(lookup("err"), unit="m")
-    return seats, arrival_at
+def average_baseline(tr: pd.DataFrame, te: pd.DataFrame):
+    """과거 평균 기준선: 평균 감소량·평균 오차."""
+    return average_seats(tr, te), te.pred_at + pd.to_timedelta(_average(tr, te, tr.err_min), unit="m")
 
 
 def predictions(tr, te, daily_cap, days_tr) -> pd.DataFrame:
@@ -86,25 +96,50 @@ def predictions(tr, te, daily_cap, days_tr) -> pd.DataFrame:
     return out
 
 
-def metrics(p: pd.DataFrame) -> dict:
-    """좌석: MAE·만석인데 여유 비율, 도착: MAE. 각각 모델 / GBIS(api) / 과거 평균(avg)."""
+def risk_key(kind: str) -> str:
+    return "risk_as_ok" if kind == "seat" else f"{kind}_risk_as_ok"
+
+
+def seat_metrics(p: pd.DataFrame, kind: str = "seat") -> dict:
+    """좌석 MAE·만석인데 여유 비율. 모델 / GBIS(api) / 과거 평균(avg)."""
     s = p[(p.seat_now >= 0) & (p.seat_at >= 0)]
     risk = features.seat_stage(s.seat_at) == "RISK"
-    m = {"n": int(len(p))}
+    m = {}
     for src in ("model", "api", "avg"):
         pred = s[f"seat_{src}"].to_numpy()
-        m[f"seat_mae_{src}"] = float(np.abs(pred - s.seat_at.to_numpy()).mean())
-        m[f"risk_as_ok_{src}"] = float(((features.seat_stage(pred) == "OK") & risk).sum() / max(risk.sum(), 1))
+        m[f"{kind}_mae_{src}"] = float(np.abs(pred - s.seat_at.to_numpy()).mean())
+        m[f"{risk_key(kind)}_{src}"] = float(((features.seat_stage(pred) == "OK") & risk).sum()
+                                             / max(risk.sum(), 1))
+    return m
+
+
+def metrics(p: pd.DataFrame) -> dict:
+    """좌석: MAE·만석인데 여유 비율, 도착: MAE. 각각 모델 / GBIS(api) / 과거 평균(avg)."""
+    m = {"n": int(len(p)), **seat_metrics(p)}
+    for src in ("model", "api", "avg"):
         m[f"arrival_mae_{src}"] = float(p[f"arr_{src}"].mean())
     return m
 
 
-def evaluate(df: pd.DataFrame, daily_cap: pd.DataFrame) -> dict:
-    """하루씩 늘려 가며 학습하고 다음 날로 시험한다. 정원 추정·과거 평균도 학습 날짜만 쓴다."""
+def predictions_all(tr, te, daily_cap, days_tr, stations) -> pd.DataFrame:
+    """5곳 밖 정류장 좌석: 시험 날짜 1일에 대해 모델·GBIS·과거 평균 좌석을 붙인다."""
+    cap = labels.capacity(daily_cap, days_tr)
+    out = te[["seat_now", "seat_at"]].copy()
+    out["seat_model"] = model.predict_seats(fit_seat(tr, cap, stations), te, cap, stations)
+    out["seat_avg"], out["seat_api"] = average_seats(tr, te, cap), te.seat_now.astype(float)
+    return out
+
+
+def evaluate(df: pd.DataFrame, daily_cap: pd.DataFrame, dfa: pd.DataFrame, stations: list) -> dict:
+    """하루씩 늘려 가며 학습하고 다음 날로 시험한다. 정원 추정·과거 평균도 학습 날짜만 쓴다.
+    dfa(5곳 밖 정류장)는 좌석만 시험해 seat_all_* 지표로 같은 날짜 행에 넣는다."""
     days = sorted(df.day.unique())
     preds = [predictions(df[df.day.isin(days[:k])], df[df.day == days[k]], daily_cap, days[:k])
              for k in range(MIN_TRAIN_DAYS, len(days))]
     per_day = [dict(day=str(p.day.iloc[0]), weekend=bool(p.weekend.iloc[0]), **metrics(p)) for p in preds]
+    for k, row in zip(range(MIN_TRAIN_DAYS, len(days)), per_day):
+        pa = predictions_all(dfa[dfa.day.isin(days[:k])], dfa[dfa.day == days[k]], daily_cap, days[:k], stations)
+        row.update(seat_metrics(pa, "seat_all"), seat_all_n=int(len(pa)))
     allp = pd.concat(preds, ignore_index=True)
 
     result = {"per_day": per_day}
@@ -112,7 +147,7 @@ def evaluate(df: pd.DataFrame, daily_cap: pd.DataFrame) -> dict:
         rows = [r for r in per_day if r["weekend"] == (dt == "weekend")]
         if not rows:
             continue
-        keys = [k for k in rows[0] if k not in ("day", "weekend", "n")]
+        keys = [k for k in rows[0] if k not in ("day", "weekend", "n", "seat_all_n")]
         result[dt] = {k: round(float(np.mean([r[k] for r in rows])), 4) for k in keys}
         result[dt]["days"] = len(rows)
         for kind in KINDS:
@@ -132,9 +167,8 @@ def judge(result: dict, kind: str, dt: str, prev: dict | None) -> list[str]:
     if not m:
         return ["시험 데이터 없음"]
     reasons = []
-    checks = [("mae", "오차")] + ([("risk_as_ok", "만석인데 여유 비율")] if kind == "seat" else [])
-    for metric, label in checks:
-        key = f"{kind}_{metric}" if metric == "mae" else metric
+    checks = [(f"{kind}_mae", "오차")] + ([(risk_key(kind), "만석인데 여유 비율")] if kind != "arrival" else [])
+    for key, label in checks:
         for base, base_name in (("api", "GBIS 값"), ("avg", "과거 평균")):
             if not m[f"{key}_model"] < m[f"{key}_{base}"]:
                 reasons.append(f"{label}가 {base_name}보다 낮지 않음 ({m[f'{key}_model']:.3f} ≥ {m[f'{key}_{base}']:.3f})")
@@ -170,14 +204,17 @@ def run(skip_download: bool = False) -> dict:
         raw_dir = collector.download()
 
     df = labels.build(raw_dir)
+    dfa = labels.build_all(raw_dir)
+    route_stations = labels.route_stations(raw_dir)
+    stations = sorted({s for v in route_stations.values() for s in v} - set(config.STATIONS))
     daily_cap = labels.daily_capacity(raw_dir)
-    result = evaluate(df, daily_cap)
+    result = evaluate(df, daily_cap, dfa, stations)
 
     state = model.active()
     prev = {}
     for kind in KINDS:   # 종류별 사용 중 버전의 성적 + 그때 합격한 칸
         if kind in state:
-            meta = model.load(state[kind]["version"])[2]
+            meta = model.load(state[kind]["version"])[1]
             prev[kind] = dict(version=meta["version"], metrics=meta["metrics"],
                               **{dt: state[kind].get(dt, False) for dt in DAY_TYPES})
     decisions = {kind: {dt: judge(result, kind, dt, prev.get(kind)) for dt in DAY_TYPES} for kind in KINDS}
@@ -188,16 +225,21 @@ def run(skip_download: bool = False) -> dict:
         version = next_version(run_at.strftime("%Y%m%d"))
         cap = labels.capacity(daily_cap)
         seat, arrival = fit(df, cap)
+        seat_all = fit_seat(dfa, cap, stations)
         meta = dict(version=version, trained_at=run_at, data_from=str(min(df.day)), data_to=str(max(df.day)),
-                    days=int(df.day.nunique()), samples=int(len(df)), features=features.FEATURES,
-                    params=dict(common=COMMON, seat=SEAT_PARAMS), metrics=result,
-                    passed=passed, reasons=decisions, capacity=cap)
-        model.save(version, seat, arrival, meta)
+                    days=int(df.day.nunique()), samples=int(len(df)), samples_all=int(len(dfa)),
+                    features=features.FEATURES, params=dict(common=COMMON, seat=SEAT_PARAMS), metrics=result,
+                    passed=passed, reasons=decisions, capacity=cap,
+                    stations_all=stations, route_stations=route_stations)
+        model.save(version, dict(seat=seat, arrival=arrival, seat_all=seat_all), meta)
         # 저장한 파일을 다시 읽어 같은 결과가 나오는지 확인 (서버는 파일로 불러오므로)
-        s2, a2, _ = model.load(version)
-        sample = df.tail(200)
-        assert np.allclose(model.apply(seat, arrival, sample, cap)[0], model.apply(s2, a2, sample, cap)[0],
-                           equal_nan=True), "저장한 모델을 다시 읽은 결과가 달라요"
+        b, _ = model.load(version)
+        sample, sample_all = df.tail(200), dfa.tail(200)
+        assert np.allclose(model.apply(seat, arrival, sample, cap)[0],
+                           model.apply(b["seat"], b["arrival"], sample, cap)[0], equal_nan=True) \
+            and np.allclose(model.predict_seats(seat_all, sample_all, cap, stations),
+                            model.predict_seats(b["seat_all"], sample_all, cap, stations), equal_nan=True), \
+            "저장한 모델을 다시 읽은 결과가 달라요"
         for kind in KINDS:   # 합격한 칸이 있는 종류만 새 버전으로 바꾼다
             if any(passed[kind].values()):
                 state[kind] = {"version": version, **passed[kind]}
@@ -233,6 +275,9 @@ def main():
         print(f"  좌석 오차      {m['seat_mae_api']:.2f} / {m['seat_mae_avg']:.2f} / {m['seat_mae_model']:.2f}석")
         print(f"  만석인데 여유  {m['risk_as_ok_api']:.0%} / {m['risk_as_ok_avg']:.0%} / {m['risk_as_ok_model']:.0%}")
         print(f"  도착 오차      {m['arrival_mae_api']:.2f} / {m['arrival_mae_avg']:.2f} / {m['arrival_mae_model']:.2f}분")
+        print(f"  5곳 밖 좌석    {m['seat_all_mae_api']:.2f} / {m['seat_all_mae_avg']:.2f} / {m['seat_all_mae_model']:.2f}석, "
+              f"만석인데 여유 {m['seat_all_risk_as_ok_api']:.0%} / {m['seat_all_risk_as_ok_avg']:.0%} / "
+              f"{m['seat_all_risk_as_ok_model']:.0%}")
         for route, rm in m["by_route"].items():
             print(f"    {route:<10} 좌석 {rm['seat_mae_api']:.2f} → {rm['seat_mae_model']:.2f}석, "
                   f"도착 {rm['arrival_mae_api']:.2f} → {rm['arrival_mae_model']:.2f}분 ({rm['n']}건)")
