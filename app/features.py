@@ -20,11 +20,12 @@ def add_ahead(df: pd.DataFrame) -> pd.DataFrame:
     return df.assign(ahead_sec=g.pred_sec.shift(), ahead_seat=g.seat_now.shift())
 
 
-def make(df: pd.DataFrame, capacity: dict) -> pd.DataFrame:
+def make(df: pd.DataFrame, capacity: dict, stations=None) -> pd.DataFrame:
+    """stations: 정류장 카테고리 목록. 없으면 수집 정류장 5곳 (전체 정류장 모델은 meta의 목록을 넘긴다)."""
     x = pd.DataFrame(index=df.index)
     # 카테고리 목록을 고정해야 학습·예측의 코드값이 같다
     x["route_id"] = pd.Categorical(df.route_id, categories=list(config.ROUTES))
-    x["station_id"] = pd.Categorical(df.station_id, categories=list(config.STATIONS))
+    x["station_id"] = pd.Categorical(df.station_id, categories=list(stations or config.STATIONS))
     x["seat_now"] = df.seat_now.where(df.seat_now >= 0).astype(float)
     x["pred_sec"] = df.pred_sec.astype(float)
     x["tod_min"] = df.t.dt.hour * 60 + df.t.dt.minute

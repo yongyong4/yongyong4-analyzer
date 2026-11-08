@@ -7,12 +7,14 @@
 import glob
 import os
 
+import numpy as np
 import pandas as pd
 
 from app import config, features
 
 MAX_TRAVEL = pd.Timedelta(minutes=90)   # 도착예정 후 이 안에 통과해야 같은 회차로 봄
 MAX_SKIP_SEQ = 5                        # 처음 관측 순번이 정류장보다 이만큼 넘으면 버림
+MAX_AHEAD_SEQ = 40                      # 전체 정류장 정답: 이 정거장 수 안쪽에서 본 좌석만 쓴다
 
 
 def _read(raw_dir: str, table: str) -> pd.DataFrame:
@@ -81,3 +83,52 @@ def build(raw_dir: str) -> pd.DataFrame:
         ["day", "t", "route_id", "station_id", "plate_no", "arrival_order", "pred_sec",
          "seat_now", "ahead_sec", "ahead_seat", "pred_at", "actual_at", "err_min", "seat_at"]
     ].sort_values("t", ignore_index=True)
+
+
+def route_stations(raw_dir: str) -> dict:
+    """수집 노선별 경유 정류장 ID (전체 정류장 좌석 예측 대상)."""
+    rs = pd.read_csv(os.path.join(raw_dir, "route_station.csv"), dtype=str)
+    rs = rs[rs.route_id.isin(config.ROUTES)]
+    return {r: sorted(g.station_id.unique()) for r, g in rs.groupby("route_id")}
+
+
+def build_all(raw_dir: str) -> pd.DataFrame:
+    """수집 정류장 5곳 밖의 정답: 버스 위치만으로 만든다 (그 정류장들은 GBIS 도착정보를 수집하지 않음).
+
+    위치 관측 1건(버스가 순번 k에 있음)마다 앞쪽 정류장 s(k < s ≤ k+MAX_AHEAD_SEQ)에 대해
+    실제 통과 시각·통과 직전 좌석을 붙인다. GBIS 남은 시간이 없으니 pred_sec 자리에 실제 걸린 초를 넣는다.
+    (예측할 때는 GBIS 남은 시간이 들어가므로 실제보다 조금 덜 맞는다 — README 한계점)
+    """
+    rs = pd.read_csv(os.path.join(raw_dir, "route_station.csv"), dtype=str)
+    rs = rs[rs.route_id.isin(config.ROUTES)]
+    seq2st = {(r, int(q)): st for r, q, st in zip(rs.route_id, rs.station_seq, rs.station_id)}
+
+    loc = _read(raw_dir, "bus_location")
+    loc = loc[loc.route_id.isin(config.ROUTES) & loc.plate_no.notna()].sort_values(["day", "route_id", "plate_no", "t"])
+    g = loc.groupby(["day", "route_id", "plate_no"])
+    new_run = (g.station_seq.diff() < 0) | (g.t.diff() > MAX_TRAVEL)
+    loc["run"] = new_run.astype(int).groupby([loc.day, loc.route_id, loc.plate_no]).cumsum()
+
+    rows = []
+    for (day, route, plate, _), r in loc.groupby(["day", "route_id", "plate_no", "run"], sort=False):
+        t, seat = r.t.to_numpy(), r.remain_seat_cnt.to_numpy()
+        seq = np.maximum.accumulate(r.station_seq.to_numpy())
+        for s in range(seq[0] + 1, seq[-1] + 1):
+            st = seq2st.get((route, s))
+            if st is None or st in config.STATIONS:
+                continue
+            j = np.searchsorted(seq, s)   # 순번 s 이상에 처음 관측된 위치
+            if seq[j] > s + MAX_SKIP_SEQ:
+                continue
+            actual = t[j] if seq[j] == s else t[j - 1] + (t[j] - t[j - 1]) / 2
+            for i in range(j):   # 통과 전 관측들 (가까운 것만)
+                if s - seq[i] <= MAX_AHEAD_SEQ and actual - t[i] <= MAX_TRAVEL:
+                    rows.append((day, t[i], route, st, plate, seat[i], actual, seat[j - 1]))
+
+    df = pd.DataFrame(rows, columns=["day", "t", "route_id", "station_id", "plate_no", "seat_now",
+                                     "actual_at", "seat_at"])
+    df["pred_sec"] = (df.actual_at - df.t).dt.total_seconds()
+    # 같은 위치 조회(시각·노선)에서 같은 정류장으로 오는 바로 앞 버스 = 요청의 앞차
+    df = features.add_ahead(df)
+    return df[["day", "t", "route_id", "station_id", "plate_no", "pred_sec", "seat_now",
+               "ahead_sec", "ahead_seat", "actual_at", "seat_at"]].sort_values("t", ignore_index=True)

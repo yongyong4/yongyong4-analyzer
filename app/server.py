@@ -1,6 +1,8 @@
 """POST /predict — 명세 「도착·좌석 예측」.
 
 사용 중 모델(models/active.json)을 불러와 예측한다. active.json이 바뀌면(매일 학습) 다음 요청 때 다시 불러온다.
+- 수집 정류장 5곳: 좌석(seat)·도착(arrival) 모델
+- 수집 노선의 그 밖 정류장: 좌석만 seat_all 모델, 도착은 받은 값 그대로
 학습 판정에 떨어진 칸: 도착은 받은 값 그대로, 좌석은 null (백엔드가 OBSERVED로 표시).
 실행: .venv/bin/uvicorn app.server:app --port 8000
 """
@@ -20,7 +22,7 @@ from pydantic import BaseModel
 from app import config, features, model
 
 KST = ZoneInfo("Asia/Seoul")
-KINDS = ("seat", "arrival")
+KINDS = ("seat", "arrival", "seat_all")
 
 class Arrival(BaseModel):
     plateNo: str
@@ -61,6 +63,7 @@ class Models:
         self.lock = threading.Lock()
         self.mtime = None
         self.state, self.boosters, self.capacity = {}, {}, {}
+        self.route_stations, self.stations_all = {}, []
 
     def get(self):
         path = os.path.join(config.MODEL_DIR, "active.json")
@@ -72,19 +75,26 @@ class Models:
             if mtime != self.mtime:
                 try:
                     state = model.active()
-                    boosters, capacity = {}, {}
+                    boosters, capacity, route_stations, stations_all = {}, {}, {}, []
                     for kind in KINDS:
-                        seat, arrival, meta = model.load(state[kind]["version"])
-                        boosters[kind] = seat if kind == "seat" else arrival
-                        capacity[kind] = meta["capacity"]
+                        if kind not in state:   # seat_all은 아직 합격한 적 없으면 없다
+                            continue
+                        b, meta = model.load(state[kind]["version"])
+                        boosters[kind], capacity[kind] = b[kind], meta["capacity"]
+                        route_stations = meta.get("route_stations") or route_stations
+                        if kind == "seat_all":
+                            stations_all = meta["stations_all"]
+                    if "seat" not in boosters or "arrival" not in boosters:
+                        raise ValueError("seat·arrival 모델이 active.json에 없어요")
                 except Exception as e:
                     raise ModelError(f"모델을 불러오지 못했어요: {e}")
                 self.state, self.boosters, self.capacity, self.mtime = state, boosters, capacity, mtime
+                self.route_stations, self.stations_all = route_stations, stations_all
             return self.state, self.boosters, self.capacity
 
     def version(self) -> str:
-        v = {kind: self.state[kind]["version"] for kind in KINDS}
-        return v["seat"] if v["seat"] == v["arrival"] else f"seat:{v['seat']},arrival:{v['arrival']}"
+        v = {kind: self.state[kind]["version"] for kind in KINDS if kind in self.state}
+        return next(iter(v.values())) if len(set(v.values())) == 1 else ",".join(f"{k}:{x}" for k, x in v.items())
 
 
 models = Models()
@@ -140,13 +150,14 @@ def health():
 def predict(req: PredictRequest):
     if req.gbisRouteId not in config.ROUTES:
         raise BadRequest("수집 광역 노선이 아니에요")
-    if req.boardStationId not in config.STATIONS:
-        raise BadRequest("수집 정류장이 아니에요")
     at = naive(req.requestAt)
     if not config.in_window(at):
         raise BadRequest("수집 시간대가 아니에요")
 
     state, boosters, capacity = models.get()
+    collected = req.boardStationId in config.STATIONS   # 수집 정류장 5곳이면 도착 보정까지
+    if not collected and req.boardStationId not in models.route_stations.get(req.gbisRouteId, []):
+        raise BadRequest("수집 노선이 지나는 정류장이 아니에요")
     if not req.arrivals:
         return PredictResponse(predictions=[], modelVersion=models.version())
 
@@ -162,12 +173,14 @@ def predict(req: PredictRequest):
     df = features.add_ahead(df).sort_index()   # 요청 순서로 되돌린다
 
     day_type = "weekend" if at.weekday() >= 5 else "weekday"
+    seat_kind = "seat" if collected else "seat_all"
     try:
-        if state["seat"].get(day_type):
-            seats = model.predict_seats(boosters["seat"], df, capacity["seat"])
+        if state.get(seat_kind, {}).get(day_type):
+            seats = model.predict_seats(boosters[seat_kind], df, capacity[seat_kind],
+                                        None if collected else models.stations_all)
         else:   # 예측하지 않은 좌석은 null → 백엔드가 받은 값을 그대로 쓰고 OBSERVED로 표시
             seats = np.full(len(df), np.nan)
-        if state["arrival"].get(day_type):
+        if collected and state["arrival"].get(day_type):
             arrivals = list(model.predict_arrival(boosters["arrival"], df, capacity["arrival"]))
         else:
             arrivals = [naive(a.predictedBusArrivalAt) for a in req.arrivals]

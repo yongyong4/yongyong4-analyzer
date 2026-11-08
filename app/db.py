@@ -9,7 +9,7 @@ from app import config
 
 DOUBLE_DECKER_SEATS = 60   # 추정 정원이 이 이상이면 2층버스 (일반 41~50석, 2층 61~80석)
 RUN_GAP = pd.Timedelta(minutes=90)
-MODEL_TYPE = {"seat": "SEAT", "arrival": "ARRIVAL"}
+MODEL_TYPE = {"seat": "SEAT", "arrival": "ARRIVAL", "seat_all": "SEAT_ALL"}   # SEAT_ALL: 5곳 밖 정류장 좌석
 DAY_TYPE = {"weekday": "WEEKDAY", "weekend": "WEEKEND"}
 
 
