@@ -1,0 +1,15 @@
+[Unit]
+Description=Yongyong predict server (FastAPI)
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+User=yongyong
+WorkingDirectory=/opt/yongyong-model
+Environment=TZ=Asia/Seoul
+ExecStart=/opt/yongyong-model/.venv/bin/uvicorn app.server:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
