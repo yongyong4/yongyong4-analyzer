@@ -1,0 +1,4 @@
+# 매일 23:00 재학습 (수집 시간대 평일 06:00-10:30, 주말 10:00-15:00 밖)
+# 합격하면 models/active.json 이 바뀌고 예측 서버는 재시작 없이 새 모델을 쓴다
+# deploy.sh 가 /etc/cron.d/yongyong-train 으로 복사한다
+0 23 * * * yongyong cd /opt/yongyong-model && .venv/bin/python -m app.train >> logs/train.log 2>&1
